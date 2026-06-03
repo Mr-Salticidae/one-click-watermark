@@ -4,9 +4,10 @@ from __future__ import annotations
 import sys
 import json
 import platform
+import threading
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import Any
+from typing import Any, Callable
 
 import fitz
 from PIL import Image, ImageDraw, ImageFont
@@ -290,7 +291,7 @@ def process_file(source: Path, target: Path, text: str, settings: WatermarkSetti
 
 
 def source_files(folder: Path) -> list[Path]:
-    ignored = {TRIAL_FOLDER, FULL_FOLDER, "build", "dist", "__pycache__", "_水印测试"}
+    ignored = {TRIAL_FOLDER, FULL_FOLDER, "build", "dist", "release", "__pycache__", "_水印测试"}
     files = []
     for item in folder.iterdir():
         if item.is_file() and item.suffix.lower() in SUPPORTED_EXTENSIONS and item.parent.name not in ignored:
@@ -298,11 +299,31 @@ def source_files(folder: Path) -> list[Path]:
     return sorted(files, key=lambda p: p.name.lower())
 
 
-def main() -> int:
-    folder = app_folder()
+def process_folder(folder: Path, settings: WatermarkSettings, log: Callable[[str], None] = print) -> int:
     trial_dir = folder / TRIAL_FOLDER
     full_dir = folder / FULL_FOLDER
     files = source_files(folder)
+
+    if not files:
+        log("没有找到 PNG、JPG、JPEG 或 PDF 文件。")
+        return 0
+
+    total = len(files)
+    log(f"找到 {total} 个文件，开始生成水印文件...")
+
+    for index, source in enumerate(files, start=1):
+        log(f"[{index}/{total}] {source.name}")
+        process_file(source, trial_dir / source.name, settings.trial_text, settings)
+        process_file(source, full_dir / source.name, settings.full_text, settings)
+
+    log("处理完成。")
+    log(f"尝鲜版输出：{trial_dir}")
+    log(f"完整版输出：{full_dir}")
+    return total
+
+
+def main_cli() -> int:
+    folder = app_folder()
     settings = customize_settings(folder, load_settings(folder))
 
     print("一键加水印工具")
@@ -310,26 +331,232 @@ def main() -> int:
     print(f"水印字号：{settings.font_size}，行数：{settings.row_count}，透明度：{settings.opacity_percent}%")
     print()
 
-    if not files:
-        print("没有找到 PNG、JPG、JPEG 或 PDF 文件。")
+    if process_folder(folder, settings) == 0:
         print("请把要处理的文件放到本工具同一个文件夹里，然后重新双击运行。")
         input("\n按回车键退出...")
         return 1
 
-    total = len(files)
-    print(f"找到 {total} 个文件，开始生成水印文件...")
-
-    for index, source in enumerate(files, start=1):
-        print(f"[{index}/{total}] {source.name}")
-        process_file(source, trial_dir / source.name, settings.trial_text, settings)
-        process_file(source, full_dir / source.name, settings.full_text, settings)
-
-    print()
-    print("处理完成。")
-    print(f"尝鲜版输出：{trial_dir}")
-    print(f"完整版输出：{full_dir}")
     input("\n按回车键退出...")
     return 0
+
+
+class WatermarkApp:
+    def __init__(self) -> None:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox, ttk
+
+        self.tk = tk
+        self.filedialog = filedialog
+        self.messagebox = messagebox
+        self.ttk = ttk
+
+        self.root = tk.Tk()
+        self.root.title("一键加水印")
+        self.root.geometry("760x620")
+        self.root.minsize(680, 560)
+
+        self.folder_var = tk.StringVar(value=str(app_folder()))
+        self.settings = load_settings(Path(self.folder_var.get()))
+
+        self.trial_text_var = tk.StringVar(value=self.settings.trial_text)
+        self.full_text_var = tk.StringVar(value=self.settings.full_text)
+        self.font_path_var = tk.StringVar(value=self.settings.font_path)
+        self.font_size_var = tk.StringVar(value=str(self.settings.font_size))
+        self.row_count_var = tk.StringVar(value=str(self.settings.row_count))
+        self.rotate_var = tk.StringVar(value=str(self.settings.rotate_degrees))
+        self.opacity_var = tk.StringVar(value=str(self.settings.opacity_percent))
+
+        self.start_button: Any = None
+        self.log_text: Any = None
+        self._build_ui()
+        self._refresh_file_count()
+
+    def _build_ui(self) -> None:
+        tk = self.tk
+        ttk = self.ttk
+
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(2, weight=1)
+
+        folder_frame = ttk.LabelFrame(self.root, text="处理文件夹", padding=12)
+        folder_frame.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+        folder_frame.columnconfigure(0, weight=1)
+
+        folder_entry = ttk.Entry(folder_frame, textvariable=self.folder_var)
+        folder_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(folder_frame, text="选择文件夹", command=self._choose_folder).grid(row=0, column=1)
+
+        settings_frame = ttk.LabelFrame(self.root, text="水印设置", padding=12)
+        settings_frame.grid(row=1, column=0, sticky="ew", padx=14, pady=8)
+        settings_frame.columnconfigure(1, weight=1)
+        settings_frame.columnconfigure(3, weight=1)
+
+        self._add_labeled_entry(settings_frame, "尝鲜版文字", self.trial_text_var, 0, 0, colspan=3)
+        self._add_labeled_entry(settings_frame, "完整版文字", self.full_text_var, 1, 0, colspan=3)
+
+        ttk.Label(settings_frame, text="字体文件").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(settings_frame, textvariable=self.font_path_var).grid(row=2, column=1, columnspan=2, sticky="ew", padx=8, pady=5)
+        ttk.Button(settings_frame, text="选择字体", command=self._choose_font).grid(row=2, column=3, sticky="ew", pady=5)
+
+        self._add_labeled_entry(settings_frame, "字号", self.font_size_var, 3, 0)
+        self._add_labeled_entry(settings_frame, "行数", self.row_count_var, 3, 2)
+        self._add_labeled_entry(settings_frame, "角度", self.rotate_var, 4, 0)
+        self._add_labeled_entry(settings_frame, "透明度", self.opacity_var, 4, 2)
+
+        action_frame = ttk.Frame(settings_frame)
+        action_frame.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        action_frame.columnconfigure(0, weight=1)
+        ttk.Button(action_frame, text="保存设置", command=self._save_settings_from_ui).grid(row=0, column=1, padx=(0, 8))
+        self.start_button = ttk.Button(action_frame, text="开始处理", command=self._start_processing)
+        self.start_button.grid(row=0, column=2)
+
+        log_frame = ttk.LabelFrame(self.root, text="处理日志", padding=12)
+        log_frame.grid(row=2, column=0, sticky="nsew", padx=14, pady=(8, 14))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+
+        self.log_text = tk.Text(log_frame, height=12, wrap="word", state="disabled")
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+
+    def _add_labeled_entry(self, parent: Any, label: str, variable: Any, row: int, column: int, colspan: int = 1) -> None:
+        ttk = self.ttk
+        ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", pady=5)
+        ttk.Entry(parent, textvariable=variable).grid(
+            row=row,
+            column=column + 1,
+            columnspan=colspan,
+            sticky="ew",
+            padx=8,
+            pady=5,
+        )
+
+    def _choose_folder(self) -> None:
+        folder = self.filedialog.askdirectory(initialdir=self.folder_var.get())
+        if not folder:
+            return
+        self.folder_var.set(folder)
+        try:
+            self.settings = load_settings(Path(folder))
+            self._set_ui_from_settings()
+        except Exception as exc:
+            self._log(f"读取设置失败：{exc}")
+        self._refresh_file_count()
+
+    def _choose_font(self) -> None:
+        filetypes = [("字体文件", "*.ttf *.ttc *.otf"), ("所有文件", "*.*")]
+        font = self.filedialog.askopenfilename(initialdir=self.folder_var.get(), filetypes=filetypes)
+        if font:
+            self.font_path_var.set(font)
+
+    def _set_ui_from_settings(self) -> None:
+        self.trial_text_var.set(self.settings.trial_text)
+        self.full_text_var.set(self.settings.full_text)
+        self.font_path_var.set(self.settings.font_path)
+        self.font_size_var.set(str(self.settings.font_size))
+        self.row_count_var.set(str(self.settings.row_count))
+        self.rotate_var.set(str(self.settings.rotate_degrees))
+        self.opacity_var.set(str(self.settings.opacity_percent))
+
+    def _settings_from_ui(self) -> WatermarkSettings:
+        settings = WatermarkSettings(
+            trial_text=self.trial_text_var.get().strip(),
+            full_text=self.full_text_var.get().strip(),
+            font_path=self.font_path_var.get().strip(),
+            font_size=int(self.font_size_var.get().strip()),
+            row_count=int(self.row_count_var.get().strip()),
+            rotate_degrees=int(self.rotate_var.get().strip()),
+            opacity_percent=int(self.opacity_var.get().strip()),
+        )
+        normalize_settings(settings)
+        if not settings.trial_text or not settings.full_text:
+            raise ValueError("水印文字不能为空。")
+        return settings
+
+    def _save_settings_from_ui(self) -> WatermarkSettings | None:
+        try:
+            folder = Path(self.folder_var.get()).expanduser()
+            if not folder.exists() or not folder.is_dir():
+                raise ValueError("处理文件夹不存在。")
+            settings = self._settings_from_ui()
+            save_settings(config_path(folder), settings)
+            self.settings = settings
+            self._set_ui_from_settings()
+            self._log(f"设置已保存：{config_path(folder)}")
+            return settings
+        except ValueError as exc:
+            self.messagebox.showerror("设置错误", str(exc))
+        except Exception as exc:
+            self.messagebox.showerror("保存失败", str(exc))
+        return None
+
+    def _refresh_file_count(self) -> None:
+        folder = Path(self.folder_var.get())
+        if folder.exists() and folder.is_dir():
+            count = len(source_files(folder))
+            self._log(f"当前文件夹：{folder}")
+            self._log(f"待处理文件：{count} 个")
+
+    def _start_processing(self) -> None:
+        settings = self._save_settings_from_ui()
+        if settings is None:
+            return
+        folder = Path(self.folder_var.get())
+        self.start_button.configure(state="disabled")
+        self._log("开始处理，请稍候...")
+
+        thread = threading.Thread(target=self._process_in_thread, args=(folder, settings), daemon=True)
+        thread.start()
+
+    def _process_in_thread(self, folder: Path, settings: WatermarkSettings) -> None:
+        try:
+            count = process_folder(folder, settings, self._thread_log)
+            if count == 0:
+                self._thread_done("没有找到可处理文件。")
+            else:
+                self._thread_done("处理完成。")
+        except Exception as exc:
+            self._thread_done(f"处理失败：{exc}", error=True)
+
+    def _thread_log(self, message: str) -> None:
+        self.root.after(0, self._log, message)
+
+    def _thread_done(self, message: str, error: bool = False) -> None:
+        self.root.after(0, self._finish_processing, message, error)
+
+    def _finish_processing(self, message: str, error: bool) -> None:
+        self._log(message)
+        self.start_button.configure(state="normal")
+        if error:
+            self.messagebox.showerror("处理失败", message)
+        else:
+            self.messagebox.showinfo("处理完成", message)
+
+    def _log(self, message: str) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", message + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def run(self) -> int:
+        self.root.mainloop()
+        return 0
+
+
+def main_gui() -> int:
+    try:
+        return WatermarkApp().run()
+    except Exception as exc:
+        print(f"图形界面启动失败：{exc}")
+        return main_cli()
+
+
+def main() -> int:
+    if "--cli" in sys.argv:
+        return main_cli()
+    return main_gui()
 
 
 if __name__ == "__main__":
