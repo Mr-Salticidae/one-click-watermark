@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+build/
+dist/
+
+*.exe
+
+_test_watermark/
+_水印测试/
